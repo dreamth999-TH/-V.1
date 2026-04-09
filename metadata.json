@@ -3,6 +3,7 @@
   "description": "ระบบบันทึกข้อมูลการเดินสำรวจข้อมูล (SPA) เชื่อมต่อ Google Sheets และ Google Drive สำหรับกองสาธารณสุขและสิ่งแวดล้อม",
   "requestFramePermissions": [
     "camera",
-    "microphone"
+    "microphone",
+    "geolocation"
   ]
 }

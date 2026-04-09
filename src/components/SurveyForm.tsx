@@ -15,13 +15,66 @@ import {
   Plus,
   Minus,
   Save,
-  X
+  X,
+  Navigation,
+  Upload,
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import Swal from 'sweetalert2';
+import { MapContainer, TileLayer, Marker, useMapEvents, useMap, LayersControl, ScaleControl } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import { surveyService, type SurveyData } from '../services/surveyService';
 
-export default function SurveyForm() {
+// Fix for default marker icon in Leaflet + React
+// @ts-ignore
+import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
+// @ts-ignore
+import markerIcon from 'leaflet/dist/images/marker-icon.png';
+// @ts-ignore
+import markerShadow from 'leaflet/dist/images/marker-shadow.png';
+
+// @ts-ignore
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: markerIcon2x,
+  iconUrl: markerIcon,
+  shadowUrl: markerShadow,
+});
+
+function LocationMarker({ lat, lng, onChange }: { lat: number | undefined, lng: number | undefined, onChange: (lat: number, lng: number) => void }) {
+  const map = useMap();
+  
+  useMapEvents({
+    click(e) {
+      onChange(e.latlng.lat, e.latlng.lng);
+    },
+  });
+
+  React.useEffect(() => {
+    if (lat && lng) {
+      map.setView([lat, lng], map.getZoom());
+    }
+  }, [lat, lng, map]);
+
+  return lat && lng ? (
+    <Marker 
+      position={[lat, lng]} 
+      draggable={true} 
+      eventHandlers={{
+        dragend: (e) => {
+          const marker = e.target;
+          const position = marker.getLatLng();
+          onChange(position.lat, position.lng);
+        }
+      }} 
+    />
+  ) : null;
+}
+
+export default function SurveyForm({ editData, onComplete }: { editData?: any, onComplete?: () => void }) {
   const { register, handleSubmit, control, watch, setValue, reset, formState: { errors } } = useForm<SurveyData>({
     defaultValues: {
       residentsCount: 1,
@@ -35,7 +88,8 @@ export default function SurveyForm() {
       pets: [],
       wasteManagement: [],
       wastewaterManagement: [],
-      feeType: 'none'
+      feeType: 'none',
+      responsiblePerson: 'System'
     }
   });
 
@@ -44,25 +98,178 @@ export default function SurveyForm() {
     name: "pets"
   });
 
+  const housingType = watch('housingType');
+  const isVacantOrAbandoned = housingType === 'บ้านว่าง' || housingType === 'บ้านร้าง';
   const hasPets = watch('hasPets');
   const residentsCount = watch('residentsCount');
   const [imagePreview, setImagePreview] = React.useState<string | null>(null);
+  const [wastewaterImagePreview, setWastewaterImagePreview] = React.useState<string | null>(null);
+  const [isImageLoading, setIsImageLoading] = React.useState(false);
+  const [isWastewaterImageLoading, setIsWastewaterImageLoading] = React.useState(false);
+  const [isLocating, setIsLocating] = React.useState(false);
+
+  // Handle Edit Data
+  React.useEffect(() => {
+    if (editData) {
+      reset(editData);
+      if (editData.imageUrl) {
+        setImagePreview(editData.imageUrl);
+      }
+      if (editData.wastewaterImageUrl) {
+        setWastewaterImagePreview(editData.wastewaterImageUrl);
+      }
+    }
+  }, [editData, reset]);
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setIsImageLoading(true);
       const reader = new FileReader();
       reader.onloadend = () => {
         setImagePreview(reader.result as string);
         setValue('imageFile', reader.result as string);
+        setIsImageLoading(false);
       };
       reader.readAsDataURL(file);
     }
   };
 
-  const onSubmit = async (data: SurveyData) => {
+  const handleWastewaterImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setIsWastewaterImageLoading(true);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setWastewaterImagePreview(reader.result as string);
+        setValue('wastewaterImageFile', reader.result as string);
+        setIsWastewaterImageLoading(false);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleGetLocation = () => {
+    if (!navigator.geolocation) {
+      Swal.fire('Error', 'เบราว์เซอร์ของคุณไม่รองรับการระบุตำแหน่ง', 'error');
+      return;
+    }
+
+    setIsLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setValue('latitude', position.coords.latitude);
+        setValue('longitude', position.coords.longitude);
+        setIsLocating(false);
+        Swal.fire({
+          icon: 'success',
+          title: 'ระบุตำแหน่งเรียบร้อย',
+          showConfirmButton: false,
+          timer: 1500
+        });
+      },
+      (error) => {
+        setIsLocating(false);
+        console.error('Geolocation error:', error);
+        Swal.fire('Error', 'ไม่สามารถระบุตำแหน่งได้ กรุณาตรวจสอบการอนุญาตเข้าถึงตำแหน่ง', 'error');
+      },
+      { enableHighAccuracy: true }
+    );
+  };
+
+  const onSubmit = async (formData: SurveyData) => {
+    // If vacant or abandoned, set default values for hidden fields
+    const data = { ...formData };
+    if (isVacantOrAbandoned) {
+      data.fullName = housingType || 'บ้านว่าง/ร้าง';
+      data.respondentType = 'ไม่มีผู้อยู่อาศัย';
+      data.residentsCount = 0;
+      data.phone = '-';
+      data.wasteManagement = [];
+      data.wastewaterManagement = [];
+      data.hasPets = 'no';
+      data.pets = [];
+      data.healthChildren = 0;
+      data.healthPregnant = 0;
+      data.healthElderlySocial = 0;
+      data.healthElderlyHome = 0;
+      data.healthElderlyBedridden = 0;
+      data.healthDisabled = 0;
+      data.feeType = 'none';
+    }
+
+    // Check for duplicates if not in edit mode
+    if (!editData) {
+      Swal.fire({
+        title: 'กำลังตรวจสอบข้อมูลซ้ำ...',
+        allowOutsideClick: false,
+        didOpen: () => {
+          Swal.showLoading();
+        }
+      });
+
+      try {
+        // Force refresh to get the most accurate duplicate check
+        const existingSurveys = await surveyService.getSurveys(true);
+        
+        const normalize = (val: any) => {
+          if (val === undefined || val === null) return "";
+          return val.toString()
+            .trim()
+            .replace(/^ถนน/, "") // Remove "ถนน" prefix
+            .replace(/\s+/g, ""); // Remove all whitespace
+        };
+
+        const targetHouseNo = normalize(data.houseNo);
+        const targetRoad = normalize(data.road);
+        const targetCommunity = normalize(data.community);
+
+        const duplicate = existingSurveys.find(s => 
+          normalize(s.houseNo) === targetHouseNo && 
+          normalize(s.road) === targetRoad && 
+          normalize(s.community) === targetCommunity
+        );
+
+        if (duplicate) {
+          const result = await Swal.fire({
+            title: 'พบข้อมูลซ้ำ!',
+            html: `บ้านเลขที่ <b>${data.houseNo}</b> ถนน<b>${data.road}</b> ชุมชน<b>${data.community}</b> มีข้อมูลอยู่ในระบบแล้ว<br/><br/>คุณต้องการดำเนินการอย่างไร?`,
+            icon: 'warning',
+            showCancelButton: true,
+            showDenyButton: true,
+            confirmButtonText: 'แทนที่ข้อมูลเดิม',
+            denyButtonText: 'บันทึกซ้ำ',
+            cancelButtonText: 'ยกเลิก',
+            confirmButtonColor: '#0891b2',
+            denyButtonColor: '#6366f1',
+            cancelButtonColor: '#94a3b8',
+          });
+
+          if (result.isConfirmed) {
+            // Replace existing data
+            await performSave(data, duplicate.id);
+            return;
+          } else if (result.isDenied) {
+            // Save as duplicate (new record)
+            await performSave(data);
+            return;
+          } else {
+            // Cancel
+            return;
+          }
+        }
+      } catch (error) {
+        console.error("Error checking duplicates:", error);
+        // Continue to save if check fails
+      }
+    }
+
+    await performSave(data, editData?.id);
+  };
+
+  const performSave = async (data: SurveyData, id?: string) => {
     Swal.fire({
-      title: 'กำลังบันทึกข้อมูล...',
+      title: id ? 'กำลังอัปเดตข้อมูล...' : 'กำลังบันทึกข้อมูล...',
       text: 'กรุณารอสักครู่',
       allowOutsideClick: false,
       didOpen: () => {
@@ -70,29 +277,37 @@ export default function SurveyForm() {
       }
     });
 
-    const result = await surveyService.submitSurvey(data);
+    const result = id 
+      ? await surveyService.updateSurvey(id, data)
+      : await surveyService.submitSurvey(data);
 
     if (result.success) {
       Swal.fire({
         icon: 'success',
         title: 'สำเร็จ!',
-        text: 'เพิ่มข้อมูลเรียบร้อย',
+        text: id ? 'อัปเดตข้อมูลเรียบร้อย' : 'เพิ่มข้อมูลเรียบร้อย',
         timer: 2000,
         showConfirmButton: false
       });
-      reset();
-      setImagePreview(null);
+      
+      if (editData && onComplete) {
+        onComplete();
+      } else {
+        reset();
+        setImagePreview(null);
+        setWastewaterImagePreview(null);
+      }
     } else {
       Swal.fire({
         icon: 'error',
         title: 'เกิดข้อผิดพลาด',
-        text: 'ไม่สามารถบันทึกข้อมูลได้ กรุณาลองใหม่อีกครั้ง'
+        text: 'ไม่สามารถดำเนินการได้ กรุณาลองใหม่อีกครั้ง'
       });
     }
   };
 
   const Counter = ({ label, name, icon: Icon }: any) => {
-    const value = watch(name) || 0;
+    const value = Number(watch(name)) || 0;
     return (
       <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-100">
         <div className="flex items-center gap-3">
@@ -124,9 +339,25 @@ export default function SurveyForm() {
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="max-w-4xl mx-auto space-y-8 pb-12">
-      <header>
-        <h2 className="text-2xl font-bold text-slate-800">แบบฟอร์มบันทึกข้อมูล</h2>
-        <p className="text-slate-500">กรุณากรอกข้อมูลให้ครบถ้วนเพื่อความถูกต้องของสถิติ</p>
+      <header className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800">
+            {editData ? 'แก้ไขข้อมูลการสำรวจ' : 'แบบฟอร์มบันทึกข้อมูล'}
+          </h2>
+          <p className="text-slate-500">
+            {editData ? `กำลังแก้ไขข้อมูลของ ${editData.fullName}` : 'กรุณากรอกข้อมูลให้ครบถ้วนเพื่อความถูกต้องของสถิติ'}
+          </p>
+        </div>
+        {editData && (
+          <button 
+            type="button"
+            onClick={onComplete}
+            className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-all flex items-center gap-2"
+          >
+            <X size={18} />
+            ยกเลิกการแก้ไข
+          </button>
+        )}
       </header>
 
       {/* 1. ข้อมูลพื้นฐาน */}
@@ -138,66 +369,7 @@ export default function SurveyForm() {
           <h3 className="font-bold text-slate-800">1. ข้อมูลพื้นฐาน</h3>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">คำนำหน้า</label>
-            <select 
-              {...register('prefix', { required: true })}
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
-            >
-              <option value="">เลือกคำนำหน้า</option>
-              <option value="นาย">นาย</option>
-              <option value="นาง">นาง</option>
-              <option value="นางสาว">นางสาว</option>
-              <option value="ไม่ทราบ">ไม่ทราบ</option>
-            </select>
-          </div>
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-slate-700 mb-2">ชื่อ-นามสกุล</label>
-            <input 
-              {...register('fullName', { required: true })}
-              placeholder="กรอกชื่อและนามสกุล"
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
-            />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">บ้านเลขที่</label>
-            <input 
-              {...register('houseNo', { required: true })}
-              placeholder="เช่น 123/4"
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">ถนน</label>
-            <select 
-              {...register('road', { required: true })}
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
-            >
-              <option value="">เลือกถนน</option>
-              <option value="ถนนขุนลุมประพาส">ถนนขุนลุมประพาส</option>
-              <option value="ถนนสิงหนาทบำรุง">ถนนสิงหนาทบำรุง</option>
-              <option value="ถนนผดุงม่วยต่อ">ถนนผดุงม่วยต่อ</option>
-              <option value="ถนนปางล้อนิคม">ถนนปางล้อนิคม</option>
-              <option value="ถนนอุดมชาวนิเทศ">ถนนอุดมชาวนิเทศ</option>
-              <option value="ถนนนิเวศพิศาล">ถนนนิเวศพิศาล</option>
-              <option value="ถนนชำนาญสถิตย์">ถนนชำนาญสถิตย์</option>
-              <option value="ถนนประดิษฐ์จองคำ">ถนนประดิษฐ์จองคำ</option>
-              <option value="ถนนราชธรรมพิทักษ์">ถนนราชธรรมพิทักษ์</option>
-              <option value="ถนนมรรคสันติ">ถนนมรรคสันติ</option>
-              <option value="ถนนศิริมงคล">ถนนศิริมงคล</option>
-              <option value="ถนนประชาชนอุทิศ">ถนนประชาชนอุทิศ</option>
-              <option value="ถนนพาณิชย์วัฒนา">ถนนพาณิชย์วัฒนา</option>
-              <option value="ถนนประชาเสกสรร">ถนนประชาเสกสรร</option>
-              <option value="ถนนสัมพันธ์เจริญเมือง">ถนนสัมพันธ์เจริญเมือง</option>
-              <option value="ถนนรุ่งเรืองการค้า">ถนนรุ่งเรืองการค้า</option>
-              <option value="ถนนนาวาคชสาร">ถนนนาวาคชสาร</option>
-              <option value="ถนนบริบาลเมืองสุข">ถนนบริบาลเมืองสุข</option>
-            </select>
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">ชุมชน</label>
             <select 
@@ -213,32 +385,41 @@ export default function SurveyForm() {
               <option value="หนองจองคำ">หนองจองคำ</option>
             </select>
           </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">เบอร์โทรศัพท์</label>
-            <input 
-              {...register('phone')}
-              placeholder="08X-XXX-XXXX"
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
-            />
-          </div>
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">ประเภทที่อยู่</label>
             <select 
               {...register('housingType', { required: true })}
               className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
             >
+              <option value="">เลือกประเภทที่อยู่</option>
               <option value="บ้าน">บ้าน</option>
-              <option value="ร้าน">ร้าน</option>
-              <option value="บ้านว่าง/ร้าง">บ้านว่าง/ร้าง</option>
+              <option value="บ้านเช่า">บ้านเช่า</option>
+              <option value="บ้านว่าง">บ้านว่าง</option>
+              <option value="บ้านร้าง">บ้านร้าง</option>
+              <option value="ร้านอาหาร">ร้านอาหาร</option>
+              <option value="ร้านค้า">ร้านค้า</option>
+              <option value="สำนักงาน">สำนักงาน</option>
               <option value="อื่นๆ">อื่นๆ</option>
             </select>
           </div>
         </div>
 
-        {watch('housingType') === 'ร้าน' && (
+        {watch('housingType') === 'อื่นๆ' && (
+          <motion.div 
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="overflow-hidden"
+          >
+            <label className="block text-sm font-medium text-slate-700 mb-2">ระบุประเภทที่อยู่อื่นๆ</label>
+            <input 
+              {...register('housingTypeOther', { required: watch('housingType') === 'อื่นๆ' })}
+              placeholder="ระบุประเภทที่อยู่"
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
+            />
+          </motion.div>
+        )}
+
+        {['ร้านอาหาร', 'ร้านค้า'].includes(watch('housingType') || '') && (
           <motion.div 
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
@@ -246,36 +427,88 @@ export default function SurveyForm() {
           >
             <label className="block text-sm font-medium text-slate-700 mb-2">ชื่อร้าน</label>
             <input 
-              {...register('shopName', { required: watch('housingType') === 'ร้าน' })}
+              {...register('shopName', { required: ['ร้านอาหาร', 'ร้านค้า'].includes(watch('housingType') || '') })}
               placeholder="กรอกชื่อร้าน"
               className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
             />
           </motion.div>
         )}
 
-        <Counter label="จำนวนผู้อยู่อาศัย" name="residentsCount" icon={Users} />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">บ้านเลขที่</label>
+            <input 
+              {...register('houseNo', { required: true })}
+              placeholder="เช่น 123/4"
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">ซอย</label>
+            <input 
+              {...register('soi')}
+              placeholder="เช่น ซอย 1"
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">ถนน</label>
+            <select 
+              {...register('road', { required: true })}
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
+            >
+              <option value="">เลือกถนน</option>
+              <option value="ขุนลุมประพาส">ขุนลุมประพาส</option>
+              <option value="สิงหนาทบำรุง">สิงหนาทบำรุง</option>
+              <option value="ผดุงม่วยต่อ">ผดุงม่วยต่อ</option>
+              <option value="ปางล้อนิคม">ปางล้อนิคม</option>
+              <option value="อุดมชาวนิเทศ">อุดมชาวนิเทศ</option>
+              <option value="นิเวศพิศาล">นิเวศพิศาล</option>
+              <option value="ชำนาญสถิตย์">ชำนาญสถิตย์</option>
+              <option value="ประดิษฐ์จองคำ">ประดิษฐ์จองคำ</option>
+              <option value="ราชธรรมพิทักษ์">ราชธรรมพิทักษ์</option>
+              <option value="มรรคสันติ">มรรคสันติ</option>
+              <option value="ศิริมงคล">ศิริมงคล</option>
+              <option value="ประชาชนอุทิศ">ประชาชนอุทิศ</option>
+              <option value="พาณิชย์วัฒนา">พาณิชย์วัฒนา</option>
+              <option value="ประชาเสกสรร">ประชาเสกสรร</option>
+              <option value="สัมพันธ์เจริญเมือง">สัมพันธ์เจริญเมือง</option>
+              <option value="รุ่งเรืองการค้า">รุ่งเรืองการค้า</option>
+              <option value="นาวาคชสาร">นาวาคชสาร</option>
+              <option value="บริบาลเมืองสุข">บริบาลเมืองสุข</option>
+            </select>
+          </div>
+        </div>
 
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-4">รูปภาพบ้านเรือน</label>
-          <div className="flex flex-col items-center justify-center border-2 border-dashed border-slate-200 rounded-2xl p-8 hover:border-cyan-500 transition-colors bg-slate-50/50">
-            {imagePreview ? (
-              <div className="relative w-full max-w-md aspect-video rounded-xl overflow-hidden shadow-lg">
-                <img src={imagePreview} alt="Preview" className="w-full h-full object-cover" />
+          <div className="flex flex-col items-center justify-center border-2 border-dashed border-slate-200 rounded-2xl p-4 md:p-8 hover:border-cyan-500 transition-colors bg-slate-50/50 min-h-[200px]">
+            {isImageLoading ? (
+              <div className="flex flex-col items-center gap-3 py-8">
+                <Loader2 size={40} className="text-cyan-500 animate-spin" />
+                <p className="text-sm font-medium text-slate-500">กำลังประมวลผลรูปภาพ...</p>
+              </div>
+            ) : imagePreview ? (
+              <div className="relative w-full max-w-2xl aspect-video rounded-xl overflow-hidden shadow-lg bg-slate-100">
+                <img src={imagePreview} alt="Preview" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
                 <button 
                   type="button"
-                  onClick={() => setImagePreview(null)}
-                  className="absolute top-2 right-2 p-1.5 bg-rose-500 text-white rounded-full shadow-lg hover:bg-rose-600"
+                  onClick={() => {
+                    setImagePreview(null);
+                    setValue('imageFile', undefined);
+                  }}
+                  className="absolute top-2 right-2 p-2 bg-rose-500 text-white rounded-full shadow-lg hover:bg-rose-600 transition-colors"
                 >
-                  <X size={16} />
+                  <X size={18} />
                 </button>
               </div>
             ) : (
-              <label className="cursor-pointer flex flex-col items-center gap-3">
+              <label className="cursor-pointer flex flex-col items-center gap-3 w-full py-8">
                 <div className="p-4 bg-white rounded-full shadow-md text-cyan-500">
                   <Camera size={32} />
                 </div>
                 <div className="text-center">
-                  <p className="text-sm font-bold text-slate-700">คลิกเพื่ออัพโหลดรูปภาพ</p>
+                  <p className="text-sm font-bold text-slate-700">คลิกเพื่ออัพโหลดรูปภาพบ้านเรือน</p>
                   <p className="text-xs text-slate-400">รองรับไฟล์ JPG, PNG</p>
                 </div>
                 <input type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
@@ -283,17 +516,173 @@ export default function SurveyForm() {
             )}
           </div>
         </div>
+
+        {!isVacantOrAbandoned && (
+          <motion.div 
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="overflow-hidden space-y-6"
+          >
+            <div className="grid grid-cols-1 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">ชื่อ-นามสกุล</label>
+                <input 
+                  {...register('fullName', { required: !isVacantOrAbandoned })}
+                  placeholder="กรอกชื่อและนามสกุล"
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">ประเภทผู้ให้ข้อมูล</label>
+                <select 
+                  {...register('respondentType', { required: !isVacantOrAbandoned })}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
+                >
+                  <option value="">เลือกประเภทผู้ให้ข้อมูล</option>
+                  <option value="เจ้าของบ้าน">เจ้าของบ้าน</option>
+                  <option value="ผู้อยู่อาศัย">ผู้อยู่อาศัย</option>
+                  <option value="ผู้เช่า">ผู้เช่า</option>
+                  <option value="อื่นๆ">อื่นๆ</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">เบอร์โทรศัพท์</label>
+                <input 
+                  {...register('phone')}
+                  placeholder="08X-XXX-XXXX"
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
+                />
+              </div>
+            </div>
+
+            <Counter label="จำนวนผู้อยู่อาศัย" name="residentsCount" icon={Users} />
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">ผู้รับผิดชอบการสำรวจ</label>
+              <input 
+                {...register('responsiblePerson', { required: true })}
+                placeholder="ระบุชื่อผู้สำรวจ"
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-cyan-500 focus:border-transparent outline-none transition-all"
+              />
+            </div>
+          </motion.div>
+        )}
+      </section>
+      
+      {/* 2. ตำแหน่งที่ตั้ง */}
+      <section className="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 space-y-6">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-indigo-100 text-indigo-600 rounded-lg">
+              <MapPin size={20} />
+            </div>
+            <h3 className="font-bold text-slate-800">2. ตำแหน่งที่ตั้ง</h3>
+          </div>
+          <button
+            type="button"
+            onClick={handleGetLocation}
+            disabled={isLocating}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold transition-all ${
+              isLocating 
+                ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
+                : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-md shadow-indigo-200'
+            }`}
+          >
+            <Navigation size={18} className={isLocating ? 'animate-spin' : ''} />
+            {isLocating ? 'กำลังระบุตำแหน่ง...' : 'ระบุตำแหน่งปัจจุบัน'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">ละติจูด (Latitude)</label>
+            <div className="relative">
+              <input 
+                {...register('latitude')}
+                type="number"
+                step="any"
+                placeholder="เช่น 19.301234"
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">ลองจิจูด (Longitude)</label>
+            <div className="flex gap-2">
+              <input 
+                {...register('longitude')}
+                type="number"
+                step="any"
+                placeholder="เช่น 97.961234"
+                className="flex-1 px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+              />
+              <button
+                type="button"
+                onClick={handleGetLocation}
+                disabled={isLocating}
+                className={`p-3 rounded-xl transition-all border ${
+                  isLocating 
+                    ? 'bg-slate-50 text-slate-400 border-slate-100 cursor-not-allowed' 
+                    : 'bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100'
+                }`}
+                title="ดึงพิกัดปัจจุบันอีกครั้ง"
+              >
+                <RefreshCw size={20} className={isLocating ? 'animate-spin' : ''} />
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-700">คลิกที่แผนที่เพื่อมาร์คจุด หรือลากมาร์คเกอร์เพื่อปรับตำแหน่ง</label>
+          <div className="h-64 w-full rounded-xl overflow-hidden border border-slate-200 shadow-inner">
+            <MapContainer 
+              center={[Number(watch('latitude')) || 19.3012, Number(watch('longitude')) || 97.9612]} 
+              zoom={17} 
+              style={{ height: '100%', width: '100%' }}
+            >
+              <LayersControl position="topleft">
+                <LayersControl.BaseLayer checked name="Street">
+                  <TileLayer
+                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                  />
+                </LayersControl.BaseLayer>
+                <LayersControl.BaseLayer name="Satellite">
+                  <TileLayer
+                    attribution='Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EBP, and the GIS User Community'
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                  />
+                </LayersControl.BaseLayer>
+              </LayersControl>
+              <ScaleControl position="bottomleft" />
+              <LocationMarker 
+                lat={Number(watch('latitude')) || undefined} 
+                lng={Number(watch('longitude')) || undefined} 
+                onChange={(lat, lng) => {
+                  setValue('latitude', lat);
+                  setValue('longitude', lng);
+                }} 
+              />
+            </MapContainer>
+          </div>
+        </div>
+        <p className="text-xs text-slate-400 italic">
+          * แนะนำให้กดปุ่ม "ระบุตำแหน่งปัจจุบัน" ขณะอยู่ที่บ้านที่กำลังสำรวจเพื่อให้ได้พิกัดที่แม่นยำ หรือคลิกเลือกตำแหน่งในแผนที่ด้านบน
+        </p>
       </section>
 
-      {/* 2. การรักษาสิ่งแวดล้อม */}
-      {watch('housingType') !== 'บ้านว่าง/ร้าง' && (
+      {/* 3. การรักษาสิ่งแวดล้อม */}
+      {!isVacantOrAbandoned && (
         <>
           <section className="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 space-y-8">
             <div className="flex items-center gap-3 mb-2">
               <div className="p-2 bg-emerald-100 text-emerald-600 rounded-lg">
                 <Trash2 size={20} />
               </div>
-              <h3 className="font-bold text-slate-800">2. การรักษาสิ่งแวดล้อม</h3>
+              <h3 className="font-bold text-slate-800">3. การรักษาสิ่งแวดล้อม</h3>
             </div>
 
             {/* Waste Management */}
@@ -301,10 +690,12 @@ export default function SurveyForm() {
               <label className="block text-sm font-bold text-slate-700 mb-4">การจัดการขยะในครัวเรือน (เลือกได้มากกว่า 1)</label>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {[
+                  'ไม่มีการคัดแยกขยะ',
                   'ถุงเขียว(รายเก่า)', 'ถุงเขียว(รายใหม่)', 
                   'ถังขยะเปียก(รายเก่า)', 'ถังขยะเปียก(รายใหม่)',
-                  'มีการคัดแยกขยะอันต', 'มีการคัดแยกขยะรีไซเคิล',
-                  'นำเศษอาหารไปเลี้ยงสัตว์', 'ทำปุ๋ย', 'อื่นๆ'
+                  'นำเศษอาหารไปเลี้ยงสัตว์', 'ทำปุ๋ย',
+                  'คัดแยกขยะอันตราย', 'คัดแยกขยะรีไซเคิล',
+                  'อื่นๆ'
                 ].map((option) => (
                   <label key={option} className="flex items-center gap-3 p-3 rounded-xl border border-slate-100 hover:bg-slate-50 cursor-pointer transition-colors">
                     <input 
@@ -317,6 +708,19 @@ export default function SurveyForm() {
                   </label>
                 ))}
               </div>
+              {watch('wasteManagement')?.includes('อื่นๆ') && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mt-4"
+                >
+                  <input 
+                    {...register('wasteManagementOther')}
+                    placeholder="ระบุการจัดการขยะอื่นๆ"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  />
+                </motion.div>
+              )}
             </div>
 
             {/* Fee Payment */}
@@ -357,35 +761,94 @@ export default function SurveyForm() {
             </div>
 
             {/* Wastewater */}
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-4">การจัดการน้ำเสีย (เลือกได้มากกว่า 1)</label>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {[
-                  'แม่น้ำ', 'ท่อ/ทางระบายน้ำสาธารณะ', 
-                  'พื้นที่ส่วนบุคคล', 'มีถังดักไขมัน',
-                  'มีบ่อบำบัดน้ำเสีย', 'ปล่อยลงบ่อเกรอะ'
-                ].map((option) => (
-                  <label key={option} className="flex items-center gap-3 p-3 rounded-xl border border-slate-100 hover:bg-slate-50 cursor-pointer transition-colors">
+            <div className="space-y-6">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-4">การจัดการน้ำเสีย (เลือกได้มากกว่า 1)</label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {[
+                    'ปล่อยน้ำลงท่อ/ทางระบายน้ำสาธารณะ', 'ปล่อยน้ำลงแม่น้ำ', 
+                    'ปล่อยน้ำลงพื้นที่ส่วนตัว', 'ปล่อยน้ำลงบ่อเกรอะ',
+                    'มีถัง/บ่อดักไขมัน', 'อื่นๆ'
+                  ].map((option) => (
+                    <label key={option} className="flex items-center gap-3 p-3 rounded-xl border border-slate-100 hover:bg-slate-50 cursor-pointer transition-colors">
+                      <input 
+                        type="checkbox" 
+                        value={option}
+                        {...register('wastewaterManagement')}
+                        className="w-5 h-5 rounded border-slate-300 text-blue-500 focus:ring-blue-500" 
+                      />
+                      <span className="text-sm text-slate-600">{option}</span>
+                    </label>
+                  ))}
+                </div>
+                {watch('wastewaterManagement')?.includes('อื่นๆ') && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="mt-4"
+                  >
                     <input 
-                      type="checkbox" 
-                      value={option}
-                      {...register('wastewaterManagement')}
-                      className="w-5 h-5 rounded border-slate-300 text-blue-500 focus:ring-blue-500" 
+                      {...register('wastewaterManagementOther')}
+                      placeholder="ระบุการจัดการน้ำเสียอื่นๆ"
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                     />
-                    <span className="text-sm text-slate-600">{option}</span>
-                  </label>
-                ))}
+                  </motion.div>
+                )}
               </div>
+
+              {/* Wastewater Image Upload */}
+              {(watch('wastewaterManagement') || []).some(opt => ['มีถัง/บ่อดักไขมัน', 'มีถังดักไขมัน', 'มีบ่อบำบัดน้ำเสีย'].includes(opt)) && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="space-y-4"
+                >
+                  <label className="block text-sm font-medium text-slate-700">รูปภาพการจัดการน้ำเสีย (ถังดักไขมัน/บ่อบำบัด)</label>
+                  <div className="flex flex-col items-center justify-center border-2 border-dashed border-slate-200 rounded-2xl p-4 md:p-8 hover:border-blue-500 transition-colors bg-slate-50/50 min-h-[200px]">
+                    {isWastewaterImageLoading ? (
+                      <div className="flex flex-col items-center gap-3 py-8">
+                        <Loader2 size={40} className="text-blue-500 animate-spin" />
+                        <p className="text-sm font-medium text-slate-500">กำลังประมวลผลรูปภาพ...</p>
+                      </div>
+                    ) : wastewaterImagePreview ? (
+                      <div className="relative w-full max-w-2xl aspect-video rounded-xl overflow-hidden shadow-lg bg-slate-100">
+                        <img src={wastewaterImagePreview} alt="Wastewater Preview" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                        <button 
+                          type="button"
+                          onClick={() => {
+                            setWastewaterImagePreview(null);
+                            setValue('wastewaterImageFile', undefined);
+                          }}
+                          className="absolute top-2 right-2 p-2 bg-rose-500 text-white rounded-full shadow-lg hover:bg-rose-600 transition-colors"
+                        >
+                          <X size={18} />
+                        </button>
+                      </div>
+                    ) : (
+                      <label className="cursor-pointer flex flex-col items-center gap-3 w-full py-8">
+                        <div className="p-4 bg-white rounded-full shadow-md text-blue-500">
+                          <Droplets size={32} />
+                        </div>
+                        <div className="text-center">
+                          <p className="text-sm font-bold text-slate-700">คลิกเพื่ออัพโหลดรูปภาพการจัดการน้ำเสีย</p>
+                          <p className="text-xs text-slate-400">รองรับไฟล์ JPG, PNG</p>
+                        </div>
+                        <input type="file" accept="image/*" className="hidden" onChange={handleWastewaterImageChange} />
+                      </label>
+                    )}
+                  </div>
+                </motion.div>
+              )}
             </div>
           </section>
 
-          {/* 3. การคัดกรองสุขภาพ */}
+          {/* 4. ประชากรกลุ่มเปราะบาง */}
           <section className="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 space-y-6">
             <div className="flex items-center gap-3 mb-2">
               <div className="p-2 bg-rose-100 text-rose-600 rounded-lg">
                 <HeartPulse size={20} />
               </div>
-              <h3 className="font-bold text-slate-800">3. การคัดกรองสุขภาพ</h3>
+              <h3 className="font-bold text-slate-800">4. ประชากรกลุ่มเปราะบาง</h3>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -409,13 +872,13 @@ export default function SurveyForm() {
             )}
           </section>
 
-          {/* 4. ทะเบียนสัตว์เลี้ยง */}
+          {/* 5. ทะเบียนสัตว์เลี้ยง */}
           <section className="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 space-y-6">
             <div className="flex items-center gap-3 mb-2">
               <div className="p-2 bg-orange-100 text-orange-600 rounded-lg">
                 <Dog size={20} />
               </div>
-              <h3 className="font-bold text-slate-800">4. ทะเบียนสัตว์เลี้ยง</h3>
+              <h3 className="font-bold text-slate-800">5. ทะเบียนสัตว์เลี้ยง</h3>
             </div>
 
             <div className="flex gap-6 p-4 bg-slate-50 rounded-xl border border-slate-100">
@@ -564,7 +1027,7 @@ export default function SurveyForm() {
           className="btn-gradient px-12 py-4 rounded-2xl flex items-center gap-3 text-lg font-bold shadow-xl hover:shadow-cyan-500/20"
         >
           <Save size={24} />
-          บันทึกข้อมูล
+          {editData ? 'อัปเดตข้อมูล' : 'บันทึกข้อมูล'}
         </button>
       </div>
     </form>

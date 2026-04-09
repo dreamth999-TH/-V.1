@@ -3,19 +3,31 @@ import Sidebar from './components/Sidebar';
 import Statistics from './components/Statistics';
 import SurveyForm from './components/SurveyForm';
 import DataTable from './components/DataTable';
+import MapView from './components/MapView';
 import { motion, AnimatePresence } from 'motion/react';
 import { Wifi, WifiOff, Loader2 } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = React.useState('stats');
   const [connectionStatus, setConnectionStatus] = React.useState<'online' | 'offline' | 'loading'>('loading');
+  const [editData, setEditData] = React.useState<any>(null);
+
+  const handleEdit = (data: any) => {
+    setEditData(data);
+    setActiveTab('add');
+  };
+
+  const clearEdit = () => {
+    setEditData(null);
+  };
 
   React.useEffect(() => {
     // Check real connection to Google Sheets
     const checkConnection = async () => {
       setConnectionStatus('loading');
       try {
-        const response = await fetch("https://script.google.com/macros/s/AKfycbweKdi_ygedf4q_nH8sZuYp-Ys5YZ-Q5DG2TvQzYoD-jOWrR9c_cbXDcdQ64wQ5xzo_qw/exec", {
+        const gasUrl = import.meta.env.VITE_GAS_URL || "https://script.google.com/macros/s/AKfycbweKdi_ygedf4q_nH8sZuYp-Ys5YZ-Q5DG2TvQzYoD-jOWrR9c_cbXDcdQ64wQ5xzo_qw/exec";
+        const response = await fetch(gasUrl, {
           method: 'GET',
           mode: 'no-cors'
         });
@@ -32,8 +44,9 @@ export default function App() {
   const renderContent = () => {
     switch (activeTab) {
       case 'stats': return <Statistics />;
-      case 'add': return <SurveyForm />;
-      case 'data': return <DataTable />;
+      case 'add': return <SurveyForm editData={editData} onComplete={clearEdit} />;
+      case 'data': return <DataTable onEdit={handleEdit} />;
+      case 'map': return <MapView onEdit={handleEdit} />;
       default: return <Statistics />;
     }
   };

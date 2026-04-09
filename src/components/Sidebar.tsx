@@ -7,7 +7,8 @@ import {
   Menu, 
   X,
   Settings,
-  LogOut
+  LogOut,
+  Map as MapIcon
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -28,6 +29,7 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
     { id: 'stats', label: 'สถิติ', icon: BarChart3 },
     { id: 'add', label: 'เพิ่มข้อมูล', icon: PlusCircle },
     { id: 'data', label: 'ข้อมูล', icon: Database },
+    { id: 'map', label: 'แผนที่', icon: MapIcon },
   ];
 
   return (

@@ -1,14 +1,15 @@
 /**
- * Google Apps Script (Code.gs)
- * Copy this code into your Google Apps Script project.
+ * GOOGLE APPS SCRIPT BACKEND FOR SURVEY APP
  * 
  * Instructions:
- * 1. Go to script.google.com
- * 2. Create a new project.
- * 3. Replace the code in Code.gs with this content.
- * 4. Replace SHEET_ID and FOLDER_ID with your actual IDs.
- * 5. Deploy as a Web App (Execute as: Me, Access: Anyone).
- * 6. Copy the Web App URL and paste it into surveyService.ts.
+ * 1. Go to script.google.com and create a new project.
+ * 2. Replace the code in Code.gs with this content.
+ * 3. Replace SHEET_ID with your Google Sheet ID.
+ * 4. Replace FOLDER_ID with your Google Drive Folder ID (for images).
+ * 5. Deploy as Web App:
+ *    - Execute as: Me
+ *    - Who has access: Anyone
+ * 6. Copy the Web App URL and paste it into src/config.ts in the React app.
  */
 
 const SHEET_ID = "1eSd0dtE8D7uoYkGptzboIjiAPBU0dHIttjmeCfCCQ1Y";
@@ -53,12 +54,21 @@ function getSurveysRaw() {
 }
 
 function doPost(e) {
+  if (!e || !e.postData || !e.postData.contents) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: "No data received" }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+  
   try {
     const contents = JSON.parse(e.postData.contents);
     const action = contents.action || 'submit';
     
     if (action === 'delete') {
       return deleteSurvey(contents.id);
+    }
+    
+    if (action === 'update') {
+      return updateSurvey(contents.id, contents);
     }
 
     const data = contents;
@@ -68,9 +78,10 @@ function doPost(e) {
     // Create header if sheet is empty
     if (sheet.getLastRow() === 0) {
       sheet.appendRow([
-        "Timestamp", "Prefix", "Full Name", "House No", "Road", "Community", 
-        "Phone", "Residents", "Housing Type", "Shop Name", "Image URL", 
-        "Waste Management", "Fee Type", "Fee Amount/Reason", "Wastewater",
+        "Timestamp", "Community", "Housing Type", "Shop Name", "House No", "Soi", "Road", 
+        "Image URL", "Latitude", "Longitude", "Full Name", "Respondent Type",
+        "Phone", "Residents", "Waste Management", "Wastewater", "Wastewater Image URL",
+        "Fee Type", "Fee Amount/Reason",
         "Children", "Pregnant", "Elderly Social", "Elderly Home", "Elderly Bedridden", "Disabled", "Disabled Details",
         "Has Pets", "Pet Details", "Responsible Person"
       ]);
@@ -78,34 +89,43 @@ function doPost(e) {
 
     let imageUrl = "";
     if (data.imageFile) {
-      imageUrl = uploadImage(data.imageFile, data.fullName);
+      imageUrl = uploadImage(data.imageFile, data.fullName + "_House");
+    }
+
+    let wastewaterImageUrl = "";
+    if (data.wastewaterImageFile) {
+      wastewaterImageUrl = uploadImage(data.wastewaterImageFile, data.fullName + "_Wastewater");
     }
 
     const rowData = [
       new Date(),
-      data.prefix,
-      data.fullName,
-      data.houseNo,
-      data.road,
       data.community,
+      data.housingType === 'อื่นๆ' ? data.housingTypeOther : data.housingType,
+      data.shopName || "",
+      data.houseNo,
+      data.soi || "",
+      data.road,
+      imageUrl,
+      data.latitude || "",
+      data.longitude || "",
+      data.fullName,
+      data.respondentType || "",
       data.phone ? "'" + data.phone : "",
       data.residentsCount,
-      data.housingType,
-      data.shopName || "",
-      imageUrl,
-      data.wasteManagement.join(", "),
+      (data.wasteManagement || []).map(v => v === 'อื่นๆ' ? `อื่นๆ (${data.wasteManagementOther || ''})` : v).join(", "),
+      (data.wastewaterManagement || []).map(v => v === 'อื่นๆ' ? `อื่นๆ (${data.wastewaterManagementOther || ''})` : v).join(", "),
+      wastewaterImageUrl,
       data.feeType,
       data.feeType === 'none' ? data.feeReason : data.feeAmount,
-      data.wastewaterManagement.join(", "),
-      data.healthChildren,
-      data.healthPregnant,
-      data.healthElderlySocial,
-      data.healthElderlyHome,
-      data.healthElderlyBedridden,
-      data.healthDisabled,
+      data.healthChildren || 0,
+      data.healthPregnant || 0,
+      data.healthElderlySocial || 0,
+      data.healthElderlyHome || 0,
+      data.healthElderlyBedridden || 0,
+      data.healthDisabled || 0,
       data.disabledDetails || "",
       data.hasPets,
-      JSON.stringify(data.pets),
+      JSON.stringify(data.pets || []),
       data.responsiblePerson || "System"
     ];
 
@@ -127,15 +147,95 @@ function deleteSurvey(id) {
     const data = sheet.getDataRange().getValues();
     
     for (let i = 1; i < data.length; i++) {
-      // Assuming ID is in some column, or we use timestamp as ID
-      // Let's use timestamp (first column) as a simple ID for now
-      if (data[i][0].toString() === id.toString()) {
+      const rowTimestamp = data[i][0];
+      let rowId = "";
+      
+      if (rowTimestamp instanceof Date) {
+        rowId = rowTimestamp.toISOString();
+      } else {
+        rowId = rowTimestamp.toString();
+      }
+
+      if (rowId === id.toString()) {
         sheet.deleteRow(i + 1);
         return ContentService.createTextOutput(JSON.stringify({ success: true, message: "ลบข้อมูลเรียบร้อย" }))
           .setMimeType(ContentService.MimeType.JSON);
       }
     }
-    return ContentService.createTextOutput(JSON.stringify({ success: false, message: "ไม่พบข้อมูล" }))
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: "ไม่พบข้อมูล (ID: " + id + ")" }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: error.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function updateSurvey(id, data) {
+  try {
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const sheet = ss.getSheets()[0];
+    const sheetData = sheet.getDataRange().getValues();
+    
+    for (let i = 1; i < sheetData.length; i++) {
+      const rowTimestamp = sheetData[i][0];
+      let rowId = "";
+      
+      if (rowTimestamp instanceof Date) {
+        rowId = rowTimestamp.toISOString();
+      } else {
+        rowId = rowTimestamp.toString();
+      }
+
+      if (rowId === id.toString()) {
+        // Prepare row data (same logic as doPost)
+        let imageUrl = data.imageUrl || "";
+        if (data.imageFile && data.imageFile.startsWith("data:image")) {
+          imageUrl = uploadImage(data.imageFile, data.fullName + "_House");
+        }
+
+        let wastewaterImageUrl = data.wastewaterImageUrl || "";
+        if (data.wastewaterImageFile && data.wastewaterImageFile.startsWith("data:image")) {
+          wastewaterImageUrl = uploadImage(data.wastewaterImageFile, data.fullName + "_Wastewater");
+        }
+
+        const rowData = [
+          rowTimestamp, // Keep original timestamp
+          data.community,
+          data.housingType === 'อื่นๆ' ? data.housingTypeOther : data.housingType,
+          data.shopName || "",
+          data.houseNo,
+          data.soi || "",
+          data.road,
+          imageUrl,
+          data.latitude || "",
+          data.longitude || "",
+          data.fullName,
+          data.respondentType || "",
+          data.phone ? "'" + data.phone : "",
+          data.residentsCount,
+          (data.wasteManagement || []).map(v => v === 'อื่นๆ' ? `อื่นๆ (${data.wasteManagementOther || ''})` : v).join(", "),
+          (data.wastewaterManagement || []).map(v => v === 'อื่นๆ' ? `อื่นๆ (${data.wastewaterManagementOther || ''})` : v).join(", "),
+          wastewaterImageUrl,
+          data.feeType,
+          data.feeType === 'none' ? data.feeReason : data.feeAmount,
+          data.healthChildren || 0,
+          data.healthPregnant || 0,
+          data.healthElderlySocial || 0,
+          data.healthElderlyHome || 0,
+          data.healthElderlyBedridden || 0,
+          data.healthDisabled || 0,
+          data.disabledDetails || "",
+          data.hasPets,
+          JSON.stringify(data.pets || []),
+          data.responsiblePerson || "System"
+        ];
+
+        sheet.getRange(i + 1, 1, 1, rowData.length).setValues([rowData]);
+        return ContentService.createTextOutput(JSON.stringify({ success: true, message: "อัปเดตข้อมูลเรียบร้อย" }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: "ไม่พบข้อมูลที่ต้องการอัปเดต" }))
       .setMimeType(ContentService.MimeType.JSON);
   } catch (error) {
     return ContentService.createTextOutput(JSON.stringify({ success: false, error: error.toString() }))
@@ -151,7 +251,8 @@ function uploadImage(base64Data, name) {
     const blob = Utilities.newBlob(bytes, contentType, "House_" + name + "_" + new Date().getTime());
     const file = folder.createFile(blob);
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    return file.getUrl();
+    // Return direct link for <img> tag to display online
+    return "https://drive.google.com/uc?export=view&id=" + file.getId();
   } catch (e) {
     return "Error: " + e.toString();
   }
